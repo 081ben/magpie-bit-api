@@ -1,0 +1,12 @@
+{
+  "name": "@magpie-community/opencode-baipiao-auth",
+  "version": "0.1.0",
+  "description": "bit-api (ai.baipiao.co) account: email sign-in for balance, daily check-in and the key-backed model list",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": ["index.mjs", "README.md", "LICENSE"],
+  "keywords": ["opencode", "opencode-plugin", "magpie", "baipiao", "bit-api"],
+  "license": "MIT",
+  "magpie": { "icon": "https://ai.baipiao.co/static/bit-api-icon-180.png" },
+  "scripts": { "test": "bun test" }
+}
