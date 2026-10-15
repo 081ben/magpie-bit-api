@@ -96,7 +96,19 @@ function usageOf(v) {
 // The gateway's /v1/models answers what the key's group serves (the guest
 // list without a token), as OpenAI's shape. magpie asks it with the account's
 // first key when the account has one, else with what the user typed.
+// magpie asks for the model table on every picker open, and the site takes
+// seconds to answer, so answers are cached for a day: the table only changes
+// when the site's group config does, and the picker must not pay the site's
+// latency every time.
+const MODELS_TTL = 24 * 60 * 60 * 1000;
+const modelsCache = { at: 0, key: null, models: null };
+
 async function discoverModels(apiKey, signal) {
+  const cached =
+    modelsCache.models &&
+    modelsCache.key === (apiKey ?? "") &&
+    Date.now() - modelsCache.at < MODELS_TTL;
+  if (cached) return modelsCache.models;
   const headers = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
   const res = await fetch(`${hostOf()}/v1/models`, {
     headers,
@@ -117,6 +129,11 @@ async function discoverModels(apiKey, signal) {
       provider: { npm: SDK.chat, api: `${hostOf()}/v1` },
       tool_call: true,
     };
+  }
+  if (Object.keys(models).length) {
+    modelsCache.at = Date.now();
+    modelsCache.key = apiKey ?? "";
+    modelsCache.models = models;
   }
   return models;
 }
