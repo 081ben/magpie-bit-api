@@ -105,11 +105,32 @@ const setLoginPageOpener = (fn) => {
 // don't fill in the questions of the next one. An answer that won't do is asked
 // again with what is wrong with it in the question itself: magpie shows the
 // question's words, and a sign-in that threw would end the whole attempt.
-const cookieQuestion = (n, pageOpened = true, wrong = "") => ({
+const NO_COOKIE = {
+  en: "That paste carries no bitapi_session.",
+  zh: "这段里没有 bitapi_session。",
+  "zh-TW": "這段裡沒有 bitapi_session。",
+};
+const STALE_COOKIE = {
+  en: "That cookie's session has expired — sign in again.",
+  zh: "这段 cookie 的会话已过期，请重新登录。",
+  "zh-TW": "這段 cookie 的工作階段已過期，請重新登入。",
+};
+const NOT_A_KEY = {
+  en: "That isn't a chat key (sk-…).",
+  zh: "这不是聊天密钥（sk-…）。",
+  "zh-TW": "這不是聊天金鑰（sk-…）。",
+};
+const refused = (why) => ({
+  en: `The site refused it: ${why}`,
+  zh: `站点拒绝了这段凭据：${why}`,
+  "zh-TW": `站點拒絕了這段憑據：${why}`,
+});
+
+const cookieQuestion = (n, pageOpened = true, wrong = null) => ({
   type: "text",
   key: `cookie${n}`,
   message:
-    (wrong ? `${wrong} ` : "") +
+    (wrong ? `${wrong.en} ` : "") +
     (pageOpened
       ? "In the login page magpie opened, sign in with the community button (社区登录), then paste the session cookie: "
       : `Open ${LOGIN_PAGE} and sign in with the community button (社区登录), then paste the session cookie: `) +
@@ -117,26 +138,30 @@ const cookieQuestion = (n, pageOpened = true, wrong = "") => ({
     "(or the whole Cookie header of any /api request)",
   messages: {
     zh:
-      (wrong ? `${wrong} ` : "") +
-      "在已打开的登录页里用社区登录（社区登录按钮）登入，然后粘贴会话 cookie：" +
+      (wrong ? `${wrong.zh} ` : "") +
+      (pageOpened
+        ? "在已打开的登录页里用社区登录（社区登录按钮）登入，然后粘贴会话 cookie："
+        : `打开 ${LOGIN_PAGE} 并用社区登录（社区登录按钮）登入，然后粘贴会话 cookie：`) +
       "F12 → Application → Cookies → https://ai.baipiao.co → 复制 bitapi_session 的值" +
       "（或任一 /api 请求的整条 Cookie 头）",
     "zh-TW":
-      (wrong ? `${wrong} ` : "") +
-      "在已開啟的登入頁裡用社群登入（社區登入按鈕）登入，然後貼上工作階段 cookie：" +
+      (wrong ? `${wrong["zh-TW"]} ` : "") +
+      (pageOpened
+        ? "在已開啟的登入頁裡用社群登入（社區登入按鈕）登入，然後貼上工作階段 cookie："
+        : `開啟 ${LOGIN_PAGE} 並用社群登入（社區登入按鈕）登入，然後貼上工作階段 cookie：`) +
       "F12 → Application → Cookies → https://ai.baipiao.co → 複製 bitapi_session 的值" +
       "（或任一 /api 請求的整條 Cookie 標頭）",
   },
   placeholder: "bitapi_session=…",
 });
 
-const keyQuestion = (n, wrong = "") => ({
+const keyQuestion = (n, wrong = null) => ({
   type: "password",
   key: `key${n}`,
-  message: (wrong ? `${wrong} ` : "") + "Paste your chat key: sk-…, from the console's Keys page",
+  message: (wrong ? `${wrong.en} ` : "") + "Paste your chat key: sk-…, from the console's Keys page",
   messages: {
-    zh: (wrong ? `${wrong} ` : "") + "粘贴聊天密钥：sk-…（控制台 Keys 页）",
-    "zh-TW": (wrong ? `${wrong} ` : "") + "貼上聊天金鑰：sk-…（控制台 Keys 頁）",
+    zh: (wrong ? `${wrong.zh} ` : "") + "粘贴聊天密钥：sk-…（控制台 Keys 页）",
+    "zh-TW": (wrong ? `${wrong["zh-TW"]} ` : "") + "貼上聊天金鑰：sk-…（控制台 Keys 頁）",
   },
   placeholder: "sk-…",
 });
@@ -147,6 +172,9 @@ async function readResponse(res) {
 }
 
 class Lapsed extends Error {}
+// Unreachable is the site not answering at all (no network, a timeout): not the
+// user's paste being wrong, so a sign-in step says nothing about it.
+class Unreachable extends Error {}
 
 // ---- the portal's pages -----------------------------------------------------
 
@@ -155,12 +183,18 @@ class Lapsed extends Error {}
 // token, so the account marks and the user signs in again. The caller decides
 // what a lapse reads as.
 async function portalGet(auth, path, signal) {
-  const r = await readResponse(
-    await fetch(`${hostOf()}${path}`, {
-      headers: { ...jsonHeaders, authorization: `Bearer ${auth.access}` },
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
-    }),
-  );
+  let r;
+  try {
+    r = await readResponse(
+      await fetch(`${hostOf()}${path}`, {
+        headers: { ...jsonHeaders, authorization: `Bearer ${auth.access}` },
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
+      }),
+    );
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    throw new Unreachable(`bit-api couldn't be reached: ${e?.message ?? e}`);
+  }
   if (r.status === 401) throw new Lapsed("bit-api's sign-in has expired — sign in again");
   if (r.status !== 200) throw new Error(`bit-api ${path}: ` + messageOf(r.v, r.status, r.text));
   return r.v;
@@ -305,6 +339,9 @@ async function signInCommunity({ cookie, key, opened }) {
   try {
     me = await portalGet({ access: token }, "/api/me", undefined);
   } catch (e) {
+    if (e instanceof Unreachable) {
+      return { type: "failed", error: `Couldn't check the cookie: ${e.message}` };
+    }
     return {
       type: "failed",
       error: e instanceof Lapsed ? `The token was refused: ${e.message}` : `The token was refused: ${e?.message ?? e}`,
@@ -329,18 +366,21 @@ async function signInCommunity({ cookie, key, opened }) {
   };
 }
 
-// checkCookie asks /api/me with the pasted cookie's session token: "" when the
+// checkCookie asks /api/me with the pasted cookie's session token: null when the
 // site knows it, else what is wrong with the paste. It is asked as the cookie is
 // answered, so a stale token or a paste that carries none says so before the
-// user goes looking for the key.
+// user goes looking for the key. A site that can't be reached says nothing: the
+// answer goes on, and the sign-in's own check reports what it finds.
 async function checkCookie(cookie) {
   const token = sessionToken(cookie);
-  if (!token) return "That paste carries no bitapi_session.";
+  if (!token) return NO_COOKIE;
   try {
     await portalGet({ access: token }, "/api/me", undefined);
-    return "";
+    return null;
   } catch (e) {
-    return e instanceof Lapsed ? "That cookie's session has expired — sign in again." : `The site refused it: ${e?.message ?? e}`;
+    if (e instanceof Lapsed) return STALE_COOKIE;
+    if (e instanceof Unreachable) return null;
+    return refused(e?.message ?? e);
   }
 }
 
@@ -389,7 +429,7 @@ export const BaipiaoPlugin = async () => {
     }
     const key = said(`key${n}`);
     if (!key) return keyQuestion(n);
-    if (!isKey(key)) return keyQuestion(n, "That isn't a chat key (sk-…).");
+    if (!isKey(key)) return keyQuestion(n, NOT_A_KEY);
     pending = { cookie, key, opened: attempt.page };
     return null;
   };
