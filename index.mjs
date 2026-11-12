@@ -280,8 +280,9 @@ export const BaipiaoPlugin = async () => {
       };
     },
     auth: {
+      // no auth.icon: package.json's magpie.icon carries the provider's icon,
+      // and the site's own favicon.ico is a 404
       provider: PROVIDER,
-      icon: "https://ai.baipiao.co/favicon.ico",
       methods: [
         {
           type: "oauth",
