@@ -16,16 +16,21 @@
 // sends it as Bearer.
 //
 // Chat requests carry an API key (sk-…) instead, which the user copies off the
-// console's Keys page once they are signed in. It comes back in the same paste
-// as the cookie, on a second line: magpie asks a method's "prompts" before it
-// opens the browser, and the key only exists to copy after the login. It is
-// required — which key pays for chat is the user's call, so the plugin never
-// guesses at the account's first one.
+// console's Keys page once they are signed in. The sign-in therefore asks two
+// questions, one after the other (magpie's own `ask` hook, as pi's sign-ins
+// use): the session cookie, then the chat key. magpie asks a method's questions
+// before it opens the browser, and the key only exists to copy after the login,
+// so the plugin opens the login page itself as the first question comes up, and
+// tells magpie it did (opened). The key is required — which key pays for chat is
+// the user's call, so the plugin never guesses at the account's first one.
 //
 // bitapi issues no refresh token: a lapsed session signs in again the same way
-// (open the browser, copy the fresh cookie).
+// (open the browser, paste the fresh cookie and key).
+
+import { spawn } from "node:child_process"
 
 const HOST = "https://ai.baipiao.co";
+const LOGIN_PAGE = `${HOST}/portal#/login`;
 // tests point the plugin at a local stand-in for the portal
 const hostOf = () => globalThis.__BAIPIAO_HOST__ ?? HOST;
 const PROVIDER = "baipiao";
@@ -67,42 +72,74 @@ function sessionToken(pasted) {
 
 const isKey = (v) => /^sk-\S+$/.test(String(v ?? "").trim());
 
-// signInPaste takes the account sign-in's paste and splits it into the session
-// token and the chat key. The session is a single cookie string, so the key
-// rides on a line of its own:
-//
-//   bitapi_session=eyJ…; bitapi_csrf=…
-//   sk-…
-//
-// A key on the cookie's own line (a Cookie header carrying one, or a second
-// field) is picked out too, so either shape works. Both are required: a paste
-// with one and not the other names no sign-in.
-function signInPaste(pasted) {
-  const lines = String(pasted ?? "")
-    .replace(/^\s*cookie:\s*/i, "")
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  let key = "";
-  const rest = [];
-  for (const line of lines) {
-    if (!key && isKey(line)) key = line;
-    else rest.push(line);
+// ---- the browser ------------------------------------------------------------
+
+// openInBrowserDefault opens url in the user's browser, the way magpie does:
+// the login page has to be up before the first question can be answered, and
+// magpie opens pages only once a method's questions are through.
+function openInBrowserDefault(url) {
+  try {
+    const [cmd, args] =
+      process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : process.platform === "darwin"
+          ? ["open", [url]]
+          : ["xdg-open", [url]];
+    const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
   }
-  const cookie = rest.join("; ");
-  const token = sessionToken(cookie);
-  if (!key) {
-    for (const part of cookie.split(";")) {
-      const i = part.indexOf("=");
-      const value = i > 0 ? part.slice(i + 1).trim() : part.trim();
-      if (isKey(value)) {
-        key = value;
-        break;
-      }
-    }
-  }
-  return { token, key };
 }
+
+// tests replace the opener, so a sign-in run there opens no browser
+let openInBrowser = openInBrowserDefault;
+const setLoginPageOpener = (fn) => {
+  openInBrowser = typeof fn === "function" ? fn : openInBrowserDefault;
+};
+
+// The two questions, asked one at a time: the cookie, then the chat key. Their
+// keys carry the attempt's number, so the answers of an attempt that failed
+// don't fill in the questions of the next one. An answer that won't do is asked
+// again with what is wrong with it in the question itself: magpie shows the
+// question's words, and a sign-in that threw would end the whole attempt.
+const cookieQuestion = (n, pageOpened = true, wrong = "") => ({
+  type: "text",
+  key: `cookie${n}`,
+  message:
+    (wrong ? `${wrong} ` : "") +
+    (pageOpened
+      ? "In the login page magpie opened, sign in with the community button (社区登录), then paste the session cookie: "
+      : `Open ${LOGIN_PAGE} and sign in with the community button (社区登录), then paste the session cookie: `) +
+    "F12 → Application → Cookies → https://ai.baipiao.co → bitapi_session's value " +
+    "(or the whole Cookie header of any /api request)",
+  messages: {
+    zh:
+      (wrong ? `${wrong} ` : "") +
+      "在已打开的登录页里用社区登录（社区登录按钮）登入，然后粘贴会话 cookie：" +
+      "F12 → Application → Cookies → https://ai.baipiao.co → 复制 bitapi_session 的值" +
+      "（或任一 /api 请求的整条 Cookie 头）",
+    "zh-TW":
+      (wrong ? `${wrong} ` : "") +
+      "在已開啟的登入頁裡用社群登入（社區登入按鈕）登入，然後貼上工作階段 cookie：" +
+      "F12 → Application → Cookies → https://ai.baipiao.co → 複製 bitapi_session 的值" +
+      "（或任一 /api 請求的整條 Cookie 標頭）",
+  },
+  placeholder: "bitapi_session=…",
+});
+
+const keyQuestion = (n, wrong = "") => ({
+  type: "password",
+  key: `key${n}`,
+  message: (wrong ? `${wrong} ` : "") + "Paste your chat key: sk-…, from the console's Keys page",
+  messages: {
+    zh: (wrong ? `${wrong} ` : "") + "粘贴聊天密钥：sk-…（控制台 Keys 页）",
+    "zh-TW": (wrong ? `${wrong} ` : "") + "貼上聊天金鑰：sk-…（控制台 Keys 頁）",
+  },
+  placeholder: "sk-…",
+});
 
 async function readResponse(res) {
   const text = await res.text();
@@ -241,13 +278,71 @@ async function checkIn(auth) {
   };
 }
 
-// ---- the chat key -----------------------------------------------------------
+// ---- the community sign-in --------------------------------------------------
 
-// The chat key is the user's, asked at sign-in: the console's Keys page is
-// where it comes from, and the plugin keeps it as the account's apiKey. The
-// account's own list (/api/keys and its reveal pages) is never consulted, so
-// the key that pays for chat is the one the user named rather than whichever
-// key the account happens to have first.
+// signInCommunity finishes the community sign-in with what the two questions
+// collected: the session cookie's value and the chat key. The token is checked
+// against /api/me, so a wrong paste says so now rather than on the first
+// request. The page is already open (opened), so magpie doesn't open it again;
+// its callback hands over what was checked, and the sign-in ends there.
+//
+// Auth (magpie's store) is a union: an OAuth account must carry refresh and
+// expires. bitapi signs no refresh token and the JWT's expiry is the site's own
+// (7 days by default), so expires 0 means "never renew automatically"; a lapsed
+// sign-in is renewed by signing in again.
+async function signInCommunity({ cookie, key, opened }) {
+  const token = sessionToken(cookie);
+  if (!token) {
+    return {
+      type: "failed",
+      error: "Paste the bitapi_session cookie's value (or the whole Cookie header of an /api request)",
+    };
+  }
+  if (!isKey(key)) {
+    return { type: "failed", error: "Paste your chat key too (sk-…, from the console's Keys page)" };
+  }
+  let me;
+  try {
+    me = await portalGet({ access: token }, "/api/me", undefined);
+  } catch (e) {
+    return {
+      type: "failed",
+      error: e instanceof Lapsed ? `The token was refused: ${e.message}` : `The token was refused: ${e?.message ?? e}`,
+    };
+  }
+  // the account is named by the site's own id for it, so a second sign-in to
+  // the same account replaces that one while another account sits beside it
+  const who = String(me?.email ?? "").trim() || (me?.id ? `bit-api #${me.id}` : "bit-api");
+  const chat = String(key).trim();
+  return {
+    url: LOGIN_PAGE,
+    opened: opened === true,
+    method: "auto",
+    callback: async () => ({
+      type: "success",
+      access: token,
+      refresh: "none",
+      expires: 0,
+      apiKey: chat,
+      accountId: who,
+    }),
+  };
+}
+
+// checkCookie asks /api/me with the pasted cookie's session token: "" when the
+// site knows it, else what is wrong with the paste. It is asked as the cookie is
+// answered, so a stale token or a paste that carries none says so before the
+// user goes looking for the key.
+async function checkCookie(cookie) {
+  const token = sessionToken(cookie);
+  if (!token) return "That paste carries no bitapi_session.";
+  try {
+    await portalGet({ access: token }, "/api/me", undefined);
+    return "";
+  } catch (e) {
+    return e instanceof Lapsed ? "That cookie's session has expired — sign in again." : `The site refused it: ${e?.message ?? e}`;
+  }
+}
 
 // ---- the plugin -------------------------------------------------------------
 
@@ -255,6 +350,49 @@ export const BaipiaoPlugin = async () => {
   // the last model list this process discovered, so a config read before the
   // account's list is asked still offers models
   let last = {};
+
+  // the sign-in under way: which attempt it is (the questions' keys carry its
+  // number, so a retry doesn't inherit the last one's answers), whether the
+  // login page was opened, and the answers the questions collected for
+  // authorize. magpie hands an ask-based method's answers nowhere, so they
+  // wait here.
+  let attempt = null;
+  let runs = 0;
+  let pending = null;
+
+  const ask = async (inputs = {}) => {
+    const a = inputs ?? {};
+    // nothing answered: a sign-in begun afresh (a retry after a failure), with
+    // its own questions and the login page opened again
+    if (Object.keys(a).length === 0) {
+      attempt = { n: ++runs, opened: false, page: false };
+      pending = null;
+    }
+    // the answers are in: magpie asks once more before it authorizes
+    if (pending) return null;
+    if (!attempt) attempt = { n: ++runs, opened: false, page: false };
+    const n = attempt.n;
+    if (!attempt.opened) {
+      attempt.opened = true;
+      attempt.page = openInBrowser(LOGIN_PAGE);
+    }
+    const said = (k) => (typeof a[k] === "string" ? a[k].trim() : "");
+    const cookie = said(`cookie${n}`);
+    if (!cookie) return cookieQuestion(n, attempt.page);
+    // the token is checked as it is pasted, so a stale one says so here rather
+    // than after the key is copied too. magpie asks the same question again on
+    // its way to authorize, so the answer that was checked is kept.
+    if (attempt.checked !== cookie) {
+      const bad = await checkCookie(cookie);
+      if (bad) return cookieQuestion(n, attempt.page, bad);
+      attempt.checked = cookie;
+    }
+    const key = said(`key${n}`);
+    if (!key) return keyQuestion(n);
+    if (!isKey(key)) return keyQuestion(n, "That isn't a chat key (sk-…).");
+    pending = { cookie, key, opened: attempt.page };
+    return null;
+  };
 
   const withToken = async (getAuth) => {
     const auth = await getAuth();
@@ -287,9 +425,22 @@ export const BaipiaoPlugin = async () => {
         {
           type: "oauth",
           label: "bit-api community sign-in (browser)",
-          // no prompts: the chat key can only be copied after the login, so it
-          // comes back in the paste the browser step asks for
-          authorize: () => authorizeCommunity(),
+          // two questions, one after the other: the cookie, then the chat key
+          // (magpie asks a method's prompts before the browser, and the key
+          // only exists to copy after the login)
+          ask,
+          authorize: async () => {
+            const a = pending;
+            attempt = null;
+            pending = null;
+            if (!a) {
+              return {
+                type: "failed",
+                error: "Paste the session cookie and your chat key first (sign in again)",
+              };
+            }
+            return signInCommunity(a);
+          },
         },
         {
           type: "api",
@@ -338,67 +489,21 @@ export const BaipiaoPlugin = async () => {
   };
 };
 
-// authorizeCommunity runs the site's community login in the user's browser.
-// The site's sign-in flow is bound to an HttpOnly cookie (bitapi_community_flow)
-// that only the browser that asks /api/community/auth/start gets, so the
-// plugin must not ask for the authorize URL itself: a URL fetched here would
-// carry a flow the browser never saw, and the callback would answer
-// "community authorization state is missing". The browser starts the flow
-// itself, on the portal's login page (社区登录 there), and the site's callback
-// page turns the code into a session — kept in the HttpOnly cookie
-// bitapi_session on ai.baipiao.co, with the matching bitapi_csrf beside it.
-// Page scripts cannot read bitapi_session, and the site clears any
-// localStorage["bitapi_token"] left over from the old sign-in, so the user
-// copies the cookie from DevTools instead: Application → Cookies →
-// https://ai.baipiao.co → bitapi_session, or the whole Cookie header the
-// Network tab shows. The plugin takes the JWT out of either form and sends it
-// as a Bearer token.
-//
-// The chat key comes back in the same paste as the cookie, on a second line: it
-// can only be copied after the login, so it cannot be a "prompts" question.
-function authorizeCommunity() {
-  return {
-    url: `${HOST}/portal#/login`,
-    instructions:
-      "On the page that opens, sign in with the community button (社区登录), " +
-      "a baipiao.org/bbs account. Back on bit-api's page, copy the session cookie: " +
-      "press F12, open Application → Cookies → https://ai.baipiao.co, and copy " +
-      "bitapi_session's value (or copy the whole Cookie header of any /api request " +
-      "from the Network tab). The site no longer keeps the token in localStorage. " +
-      "Put your chat key (sk-…, from the console's Keys page) on a second line, " +
-      "below the cookie, and paste both here.",
-    method: "code",
-    callback: async (code0) => {
-      const { token, key } = signInPaste(code0);
-      if (!token) {
-        return {
-          type: "failed",
-          error:
-            "Paste the bitapi_session cookie's value (or the whole Cookie header)" +
-            (key ? ", and the chat key on a second line" : ""),
-        };
-      }
-      if (!key) {
-        return {
-          type: "failed",
-          error:
-            "Paste your chat key too, on a second line below the cookie " +
-            "(sk-…, from the console's Keys page)",
-        };
-      }
-      // a wrong paste says so now, not on the first request
-      try {
-        await portalGet({ access: token }, "/api/me", undefined);
-      } catch (e) {
-        return { type: "failed", error: e instanceof Lapsed ? `The token was refused: ${e.message}` : `The token was refused: ${e?.message ?? e}` };
-      }
-      // Auth (magpie's store) is a union: an OAuth account must carry refresh
-      // and expires. bitapi signs no refresh token and the JWT's expiry is
-      // the site's own (7 days by default), so expires 0 means "never renew
-      // automatically"; a lapsed sign-in is renewed by signing in again.
-      return { type: "success", access: token, refresh: "none", expires: 0, apiKey: key, accountId: "bit-api" };
-    },
-  };
-}
-
-export const _internal = { HOST, hostOf, PROVIDER, SDK, portalGet, usageOf, checkIn, discoverModels, authorizeCommunity, messageOf, money, sessionToken, signInPaste, isKey };
+export const _internal = {
+  HOST,
+  LOGIN_PAGE,
+  hostOf,
+  PROVIDER,
+  SDK,
+  portalGet,
+  usageOf,
+  checkIn,
+  discoverModels,
+  signInCommunity,
+  openInBrowserDefault,
+  setLoginPageOpener,
+  messageOf,
+  money,
+  sessionToken,
+  isKey,
+};

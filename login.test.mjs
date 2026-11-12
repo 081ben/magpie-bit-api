@@ -1,13 +1,30 @@
-// The community sign-in: the plugin opens the authorize URL, the user signs in
-// in the browser, then pastes the session the site keeps in its HttpOnly cookie
-// (bitapi_session) with the chat key on a second line. The token is checked
-// against /api/me and the key is kept beside it.
+// The community sign-in, asked as two questions one after the other: the
+// session cookie (the site keeps it in the HttpOnly cookie bitapi_session), then
+// the chat key. The login page is opened as the first question comes up, since
+// the key only exists to copy after the login. The cookie is checked against
+// /api/me as it is pasted, and the answers are kept with the key.
 import { afterEach, expect, test } from "bun:test"
 import { BaipiaoPlugin, _internal } from "./index.mjs"
 import { fakeBaipiao, startRoutes } from "./fake.mjs"
 
 let f
-afterEach(() => f?.close())
+let opened = []
+
+// every test starts with the opener stubbed, so a sign-in here opens no browser
+_internal.setLoginPageOpener((url) => {
+  opened.push(url)
+  return true
+})
+
+afterEach(() => {
+  f?.close()
+  f = null
+  opened = []
+  _internal.setLoginPageOpener((url) => {
+    opened.push(url)
+    return true
+  })
+})
 
 const plugin = async () => BaipiaoPlugin()
 
@@ -16,26 +33,162 @@ const method = (hooks) => hooks.auth.methods.find((m) => m.type === "oauth")
 const KEY = "sk-mine-9"
 const JWT = "jwt-pasted"
 
-test("authorize opens the portal's own login page, asking nothing itself", async () => {
+// a stand-in portal that knows the token the tests paste
+const portal = () => {
   f = fakeBaipiao()
+  startRoutes(f)
+  return f
+}
+
+// signIn runs the questions the way magpie does: ask with the answers so far,
+// until none is left, then authorize.
+const signIn = async (hooks, answers = (q) => (q.key.startsWith("cookie") ? `bitapi_session=${JWT}` : KEY)) => {
+  const m = method(hooks)
+  const inputs = {}
+  for (let i = 0; i < 10; i++) {
+    const q = await m.ask(inputs)
+    if (!q) return m.authorize()
+    inputs[q.key] = answers(q)
+  }
+  throw new Error("the sign-in kept asking")
+}
+
+test("the first question is the session cookie, and it opens the login page", async () => {
+  portal()
   const hooks = await plugin()
-  const out = await method(hooks).authorize()
-  expect(out.method).toBe("code")
-  expect(out.url).toBe("https://ai.baipiao.co/portal#/login")
-  // the flow cookie belongs to the user's browser; the plugin asks nothing
+  const q = await method(hooks).ask({})
+  expect(q.key).toBe("cookie1")
+  expect(q.type).toBe("text")
+  expect(q.placeholder).toBe("bitapi_session=…")
+  expect(q.message).toMatch(/bitapi_session/)
+  expect(q.messages.zh).toMatch(/bitapi_session/)
+  expect(opened).toEqual(["https://ai.baipiao.co/portal#/login"])
+})
+
+test("the page is opened once per attempt, not for every question", async () => {
+  portal()
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  await m.ask({ [first.key]: `bitapi_session=${JWT}` })
+  expect(opened.length).toBe(1)
+})
+
+test("the second question is the chat key, typed unseen", async () => {
+  portal()
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  const second = await m.ask({ [first.key]: `bitapi_session=${JWT}` })
+  expect(second.key).toBe("key1")
+  expect(second.type).toBe("password")
+  expect(second.message).toMatch(/chat key/)
+  expect(second.messages.zh).toMatch(/聊天密钥/)
+})
+
+test("the cookie is checked as it is pasted, not after the key", async () => {
+  portal()
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  await m.ask({ [first.key]: `bitapi_session=${JWT}` })
+  expect(f.seen.filter((r) => r.path === "/api/me").length).toBe(1)
+  // magpie asks the same question again on its way to authorize: not checked twice
+  await m.ask({ [first.key]: `bitapi_session=${JWT}` })
+  expect(f.seen.filter((r) => r.path === "/api/me").length).toBe(1)
+})
+
+test("a cookie the site turns away is asked again with why", async () => {
+  portal()
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  const again = await m.ask({ [first.key]: "bitapi_session=jwt-wrong" })
+  expect(again.key).toBe(first.key)
+  expect(again.message).toMatch(/expired|refused/)
+})
+
+test("a paste with no session cookie is asked again with why", async () => {
+  portal()
+  const hooks = await plugin()
+  const first = await method(hooks).ask({})
+  const again = await method(hooks).ask({ [first.key]: "bitapi_csrf=abc; bitapi_theme=dark" })
+  expect(again.key).toBe(first.key)
+  expect(again.message).toMatch(/bitapi_session/)
   expect(f.seen.length).toBe(0)
 })
 
-test("nothing is asked before the browser: the key comes after the login", async () => {
-  const m = method(await plugin())
-  expect(m.prompts).toBeUndefined()
+test("a key that isn't one is asked again with why", async () => {
+  portal()
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  const again = await m.ask({ [first.key]: `bitapi_session=${JWT}`, key1: "nope" })
+  expect(again.key).toBe("key1")
+  expect(again.message).toMatch(/chat key/)
 })
 
-test("the instructions point at the session cookie and the second line", async () => {
-  const out = await (await method(await plugin())).authorize()
-  expect(out.instructions).toMatch(/bitapi_session/)
-  expect(out.instructions).not.toMatch(/localStorage\.bitapi_token/)
-  expect(out.instructions).toMatch(/second line/)
+test("once both are answered no question is left", async () => {
+  portal()
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  const second = await m.ask({ [first.key]: `bitapi_session=${JWT}` })
+  const done = await m.ask({ [first.key]: `bitapi_session=${JWT}`, [second.key]: KEY })
+  expect(done).toBeNull()
+})
+
+test("a retry asks again from the cookie, with questions of its own", async () => {
+  portal()
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  await m.ask({ [first.key]: `bitapi_session=${JWT}` })
+  // magpie starts the sign-in over with nothing answered
+  const again = await m.ask({})
+  expect(again.key).not.toBe(first.key)
+  expect(opened.length).toBe(2)
+})
+
+test("the answers finish the sign-in, which magpie doesn't open again", async () => {
+  portal()
+  const hooks = await plugin()
+  const out = await signIn(hooks)
+  expect(out.type).toBeUndefined()
+  expect(out.url).toBe("https://ai.baipiao.co/portal#/login")
+  expect(out.opened).toBe(true)
+  expect(out.method).toBe("auto")
+  const kept = await out.callback()
+  expect(kept.type).toBe("success")
+  expect(kept.access).toBe(JWT)
+  expect(kept.apiKey).toBe(KEY)
+  // magpie's Auth union needs refresh and expires on an OAuth account
+  expect(kept.refresh).toBe("none")
+  expect(kept.expires).toBe(0)
+  // named by the site's own id for the account, so a second account of the
+  // site's sits beside the first rather than replacing it
+  expect(kept.accountId).toBe("ann@example.com")
+})
+
+test("the account's own key list is never read", async () => {
+  portal()
+  const hooks = await plugin()
+  const out = await signIn(hooks)
+  await out.callback()
+  expect(f.seen.map((r) => r.path)).not.toContain("/api/keys")
+})
+
+test("a page that didn't open is not claimed as opened", async () => {
+  portal()
+  _internal.setLoginPageOpener(() => false)
+  const hooks = await plugin()
+  const m = method(hooks)
+  const first = await m.ask({})
+  expect(first.message).toMatch(/https:\/\/ai\.baipiao\.co\/portal#\/login/)
+  const second = await m.ask({ [first.key]: `bitapi_session=${JWT}` })
+  await m.ask({ [first.key]: `bitapi_session=${JWT}`, [second.key]: KEY })
+  const out = await m.authorize()
+  expect(out.opened).toBe(false)
 })
 
 test("the pasted cookie string yields the session token in either form", () => {
@@ -50,86 +203,32 @@ test("the pasted cookie string yields the session token in either form", () => {
   expect(_internal.sessionToken("")).toBe("")
 })
 
-test("the paste splits into a session token and a key", () => {
-  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"
-  expect(_internal.signInPaste(`bitapi_session=${jwt}\n${KEY}`)).toEqual({ token: jwt, key: KEY })
-  expect(_internal.signInPaste(`${jwt}\n  ${KEY}  `)).toEqual({ token: jwt, key: KEY })
-  // a key on the cookie's own line is picked out of it
-  expect(_internal.signInPaste(`bitapi_session=${jwt}; ${KEY}`)).toEqual({ token: jwt, key: KEY })
-  expect(_internal.signInPaste(`bitapi_session=${jwt}`)).toEqual({ token: jwt, key: "" })
-  expect(_internal.signInPaste(KEY)).toEqual({ token: "", key: KEY })
-})
-
-test("a paste with both is checked and kept with the key", async () => {
-  f = fakeBaipiao()
-  startRoutes(f)
-  const hooks = await plugin()
-  const out = await (await method(hooks).authorize()).callback(
-    `bitapi_csrf=abc; bitapi_session=${JWT}\n${KEY}`,
-  )
-  expect(out.type).toBe("success")
-  expect(out.access).toBe(JWT)
-  expect(out.apiKey).toBe(KEY)
-  expect(f.seen.find((r) => r.path === "/api/me").headers.get("authorization")).toBe(`Bearer ${JWT}`)
-})
-
-test("the sign-in keeps the named key, and asks the account for no other", async () => {
-  f = fakeBaipiao()
-  startRoutes(f)
-  const hooks = await plugin()
-  const out = await (await method(hooks).authorize()).callback(`bitapi_session=${JWT}\n${KEY}`)
-  expect(out.type).toBe("success")
-  expect(out.apiKey).toBe(KEY)
-  // magpie's Auth union needs refresh and expires on an OAuth account
-  expect(out.refresh).toBe("none")
-  expect(out.expires).toBe(0)
-  // the account's own key list is never read: no reveal, no guessing
-  expect(f.seen.map((r) => r.path)).not.toContain("/api/keys")
-})
-
 test("a wrong or stale token is a failed sign-in, named as such", async () => {
-  f = fakeBaipiao()
-  startRoutes(f)
-  const hooks = await plugin()
-  const out = await (await method(hooks).authorize()).callback(`bitapi_session=jwt-wrong\n${KEY}`)
+  portal()
+  const out = await _internal.signInCommunity({ cookie: "bitapi_session=jwt-wrong", key: KEY, opened: true })
   expect(out.type).toBe("failed")
   expect(out.error).toMatch(/refused/)
 })
 
-test("a paste without the key fails, saying where it goes", async () => {
+test("a cookie without the session fails before the portal is asked", async () => {
   f = fakeBaipiao()
-  startRoutes(f)
-  const hooks = await plugin()
-  const out = await (await method(hooks).authorize()).callback(`bitapi_session=${JWT}`)
+  const out = await _internal.signInCommunity({ cookie: "bitapi_csrf=abc; bitapi_theme=dark", key: KEY, opened: true })
+  expect(out.type).toBe("failed")
+  expect(out.error).toMatch(/bitapi_session/)
+  expect(f.seen.length).toBe(0)
+})
+
+test("a key that isn't one fails, saying where it comes from", async () => {
+  f = fakeBaipiao()
+  const out = await _internal.signInCommunity({ cookie: `bitapi_session=${JWT}`, key: "nope", opened: true })
   expect(out.type).toBe("failed")
   expect(out.error).toMatch(/chat key/)
-  expect(out.error).toMatch(/second line/)
-  // the token was never checked: nothing is saved without the key
-  expect(f.seen.filter((r) => r.path === "/api/me").length).toBe(0)
-})
-
-test("a key pasted without a session fails and says why", async () => {
-  f = fakeBaipiao()
-  const hooks = await plugin()
-  const out = await (await method(hooks).authorize()).callback(KEY)
-  expect(out.type).toBe("failed")
-  expect(out.error).toMatch(/bitapi_session/)
   expect(f.seen.length).toBe(0)
 })
 
-test("an empty paste fails before the portal is asked", async () => {
-  f = fakeBaipiao()
+test("authorize without the answers says to sign in again", async () => {
   const hooks = await plugin()
-  const out = await (await method(hooks).authorize()).callback("  ")
+  const out = await method(hooks).authorize()
   expect(out.type).toBe("failed")
-  expect(f.seen.filter((r) => r.path === "/api/me").length).toBe(0)
-})
-
-test("a cookie string without the session cookie fails before the portal is asked", async () => {
-  f = fakeBaipiao()
-  const hooks = await plugin()
-  const out = await (await method(hooks).authorize()).callback(`bitapi_csrf=abc; bitapi_theme=dark\n${KEY}`)
-  expect(out.type).toBe("failed")
-  expect(out.error).toMatch(/bitapi_session/)
-  expect(f.seen.length).toBe(0)
+  expect(out.error).toMatch(/sign in again/)
 })
