@@ -1,6 +1,6 @@
 // The community sign-in: the plugin opens the authorize URL, the user pastes
-// the session token the site's callback page stored; the token is checked
-// against /api/me and the account's first chat key comes with it.
+// the session the site keeps in its HttpOnly cookie (bitapi_session), and the
+// token is checked against /api/me; the account's first chat key comes with it.
 import { afterEach, expect, test } from "bun:test"
 import { BaipiaoPlugin, _internal } from "./index.mjs"
 import { account, fakeBaipiao, json, startRoutes } from "./fake.mjs"
@@ -20,6 +20,37 @@ test("authorize opens the portal's own login page, asking nothing itself", async
   expect(out.url).toBe("https://ai.baipiao.co/portal#/login")
   // the flow cookie belongs to the user's browser; the plugin asks nothing
   expect(f.seen.length).toBe(0)
+})
+
+test("the instructions point at the session cookie, not localStorage", async () => {
+  const out = await (await method(await plugin())).authorize()
+  expect(out.instructions).toMatch(/bitapi_session/)
+  expect(out.instructions).not.toMatch(/localStorage\.bitapi_token/)
+})
+
+test("the pasted cookie string yields the session token in either form", () => {
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"
+  expect(_internal.sessionToken(jwt)).toBe(jwt)
+  expect(_internal.sessionToken(`  ${jwt}\n`)).toBe(jwt)
+  expect(_internal.sessionToken(`bitapi_session=${jwt}`)).toBe(jwt)
+  expect(_internal.sessionToken(`bitapi_csrf=abc; bitapi_session=${jwt}; bitapi_theme=dark`)).toBe(jwt)
+  expect(_internal.sessionToken(`Cookie: bitapi_session=${jwt}; bitapi_csrf=abc`)).toBe(jwt)
+  // a Cookie header without the session cookie names no token
+  expect(_internal.sessionToken("bitapi_csrf=abc")).toBe("")
+  expect(_internal.sessionToken("")).toBe("")
+})
+
+test("a pasted cookie header is checked and stored as its session token", async () => {
+  f = fakeBaipiao()
+  startRoutes(f)
+  f.route("GET /api/keys", () => json({ keys: [] }))
+  const hooks = await plugin()
+  const out = await (await method(hooks).authorize()).callback(
+    "bitapi_csrf=abc; bitapi_session=jwt-pasted",
+  )
+  expect(out.type).toBe("success")
+  expect(out.access).toBe("jwt-pasted")
+  expect(f.seen.find((r) => r.path === "/api/me").headers.get("authorization")).toBe("Bearer jwt-pasted")
 })
 
 test("a pasted token is checked against /api/me and stored with the first key", async () => {
@@ -62,6 +93,15 @@ test("an empty paste fails before the portal is asked", async () => {
   expect(out.type).toBe("failed")
   // only the authorize page's start ask went out; no token check
   expect(f.seen.filter((r) => r.path === "/api/me").length).toBe(0)
+})
+
+test("a cookie string without the session cookie fails before the portal is asked", async () => {
+  f = fakeBaipiao()
+  const hooks = await plugin()
+  const out = await (await method(hooks).authorize()).callback("bitapi_csrf=abc; bitapi_theme=dark")
+  expect(out.type).toBe("failed")
+  expect(out.error).toMatch(/bitapi_session/)
+  expect(f.seen.length).toBe(0)
 })
 
 test("an account without a key yet still signs in", async () => {

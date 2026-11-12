@@ -3,15 +3,21 @@
 // The site is a bitapi (kingenbomb/bitapi) gateway: OpenAI- and
 // Anthropic-compatible at https://ai.baipiao.co/v1, billed from an account
 // balance. Accounts sign in through the site's community login: the browser
-// opens baipiao.org/bbs's OAuth page, the site's own callback page takes the
-// authorization code and turns it into a session token (a JWT, 7 days by
-// default), and the user pastes that token here. The token is what the
-// account pages (/api/me, /api/overview, /api/keys, /api/checkin) answer;
-// chat requests carry an API key (sk-…) instead, which the plugin picks off
-// the account's first key, or the user types one in.
+// opens baipiao.org/bbs's OAuth page, and the site's own callback page turns
+// the authorization code into a session (a JWT, 7 days by default).
 //
-// bitapi issues no refresh token: a lapsed token signs in again the same way
-// (open the browser, paste the fresh token).
+// The portal keeps that session in the HttpOnly cookie bitapi_session, which
+// page scripts cannot read — the site's own JS calls localStorage.removeItem
+// ("bitapi_token") on load, so the token is no longer there. The user copies
+// the cookie's value from the browser's DevTools instead (Application →
+// Cookies), or the whole cookie string, and pastes it here. The value is the
+// JWT itself, and bitapi still accepts script clients' Bearer tokens on every
+// /api page (cookie sessions would need a CSRF header on POST), so the plugin
+// sends it as Bearer. Chat requests carry an API key (sk-…) instead, which the
+// plugin picks off the account's first key, or the user types one in.
+//
+// bitapi issues no refresh token: a lapsed session signs in again the same way
+// (open the browser, copy the fresh cookie).
 
 const HOST = "https://ai.baipiao.co";
 // tests point the plugin at a local stand-in for the portal
@@ -35,6 +41,23 @@ function parseJSON(text) {
 
 const messageOf = (v, status, text) =>
   String(v?.detail ?? v?.message ?? text?.trim().slice(0, 200) ?? `HTTP ${status}`);
+
+// sessionToken takes what the user pasted and returns the session JWT. The
+// portal keeps it in the HttpOnly cookie bitapi_session, so the paste is often
+// the cookie's value alone; a whole Cookie header pasted out of DevTools
+// ("bitapi_session=…; bitapi_csrf=…") is accepted too, as is a bare JWT from
+// an older sign-in.
+function sessionToken(pasted) {
+  const raw = String(pasted ?? "").trim().replace(/^cookie:\s*/i, "");
+  if (!raw) return "";
+  if (!raw.includes("=")) return raw;
+  for (const part of raw.split(";")) {
+    const i = part.indexOf("=");
+    if (i < 0) continue;
+    if (part.slice(0, i).trim() === "bitapi_session") return part.slice(i + 1).trim();
+  }
+  return "";
+}
 
 async function readResponse(res) {
   const text = await res.text();
@@ -291,24 +314,36 @@ export const BaipiaoPlugin = async ({ client } = {}) => {
 // carry a flow the browser never saw, and the callback would answer
 // "community authorization state is missing". The browser starts the flow
 // itself, on the portal's login page (社区登录 there), and the site's callback
-// page turns the code into a session token stored as
-// localStorage["bitapi_token"] on ai.baipiao.co. The user pastes that token
-// here. A chat key typed in the second prompt is used as it is; one pasted
-// empty leaves the key to the account's own first active key. method "code"
-// is what OpenCode's and magpie's sign-in dialogs do with it: one field, the
-// answer comes back to authorize.
+// page turns the code into a session — kept in the HttpOnly cookie
+// bitapi_session on ai.baipiao.co, with the matching bitapi_csrf beside it.
+// Page scripts cannot read bitapi_session, and the site clears any
+// localStorage["bitapi_token"] left over from the old sign-in, so the user
+// copies the cookie from DevTools instead: Application → Cookies →
+// https://ai.baipiao.co → bitapi_session, or the whole Cookie header the
+// Network tab shows. The plugin takes the JWT out of either form and sends it
+// as a Bearer token. A chat key typed in the second prompt is used as it is;
+// one pasted empty leaves the key to the account's own first active key.
+// method "code" is what OpenCode's and magpie's sign-in dialogs do with it:
+// one field, the answer comes back to authorize.
 function authorizeCommunity() {
   return {
     url: `${HOST}/portal#/login`,
     instructions:
       "On the page that opens, sign in with the community button (社区登录), " +
-      "a baipiao.org/bbs account. After it comes back to bit-api's page, copy " +
-      "your session token: press F12 for the console on the bit-api tab and " +
-      "run localStorage.bitapi_token, then paste what it prints here.",
+      "a baipiao.org/bbs account. Back on bit-api's page, copy the session cookie: " +
+      "press F12, open Application → Cookies → https://ai.baipiao.co, and copy " +
+      "bitapi_session's value (or copy the whole Cookie header of any /api request " +
+      "from the Network tab). Paste it here. The site no longer keeps the token in " +
+      "localStorage.",
     method: "code",
     callback: async (code0) => {
-      const token = String(code0 ?? "").trim();
-      if (!token) return { type: "failed", error: "Paste the session token" };
+      const token = sessionToken(code0);
+      if (!token) {
+        return {
+          type: "failed",
+          error: "Paste the bitapi_session cookie's value (or the whole Cookie header)",
+        };
+      }
       // a wrong paste says so now, not on the first request
       try {
         await portalGet({ access: token }, "/api/me", undefined);
@@ -341,4 +376,4 @@ async function firstKey(auth) {
   return key;
 }
 
-export const _internal = { HOST, hostOf, PROVIDER, SDK, portalGet, usageOf, checkIn, discoverModels, firstKey, firstKeyRaw, authorizeCommunity, messageOf, money };
+export const _internal = { HOST, hostOf, PROVIDER, SDK, portalGet, usageOf, checkIn, discoverModels, firstKey, firstKeyRaw, authorizeCommunity, messageOf, money, sessionToken };

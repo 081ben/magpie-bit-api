@@ -34,13 +34,19 @@
 1. magpie 里选择该登录方式,插件会打开 bit-api 的登录页;
 2. 在页面上完成登录(整个登录流程都发生在你的浏览器里——登录流绑定一个只有
    浏览器持有的 HttpOnly cookie,插件无法代劳);
-3. 登录完成后,bit-api 页面会把会话 token 存起来:在该页面按 **F12** 打开控制台,
-   运行 `localStorage.bitapi_token`,复制输出的那串 JWT,粘贴回 magpie;
-4. 插件验真 token 后,自动抓取账户第一把启用的聊天密钥(与控制台"复制"按钮走同一个
+3. 登录完成后,bit-api 把会话存在 **HttpOnly cookie `bitapi_session`** 里
+   (旁边还有一个 `bitapi_csrf`)。页面脚本读不到它,站点自己还会在每次加载时
+   `localStorage.removeItem("bitapi_token")`,所以**不能再从 localStorage 取 token**。
+   在该页面按 **F12**,打开 **Application → Cookies → https://ai.baipiao.co**,
+   复制 `bitapi_session` 的值;也可以从 **Network** 面板任一 `/api` 请求里复制整条
+   `Cookie` 头,插件会自己取出其中的 `bitapi_session`;
+4. 插件验真后,自动抓取账户第一把启用的聊天密钥(与控制台"复制"按钮走同一个
    reveal 接口),聊天与拉模型都用它。
 
-token 是站点自己签发的 JWT,默认 7 天有效。站点不签发 refresh token,过期后照原样
-重来一遍(打开浏览器、粘贴新 token)即可。
+cookie 里装的就是站点签发的会话 JWT,默认 7 天有效;`bitapi_session` 本身是
+HttpOnly,而插件用的是同一个 JWT 的 `Authorization: Bearer`(bitapi 对脚本客户端
+保留 Bearer,GET 请求不需要 CSRF 头)。站点不签发 refresh token,过期后照原样
+重来一遍(打开浏览器、粘贴新 cookie)即可。
 
 ### 二、API key
 
@@ -55,6 +61,10 @@ token 是站点自己签发的 JWT,默认 7 天有效。站点不签发 refresh 
 | `GET /api/overview` | 会话 token | 余额(卡片余额行)、今日消费与请求数 |
 | `POST /api/checkin` | 会话 token | 每日签到,UTC+8 自然日一次 |
 | `GET /api/keys` + `GET /api/keys/{id}/reveal` | 会话 token | 密钥列表只给脱敏串,明文按 id 单取 |
+
+站点把浏览器登录态放在 HttpOnly cookie `bitapi_session` 里,同一份 JWT 也接受
+脚本客户端用 `Authorization: Bearer` 发来;插件走的就是 Bearer,因此 POST
+(`/api/checkin`)不需要 `X-CSRF-Token`。
 
 网关本身兼容 OpenAI chat completions、Responses 与 Anthropic Messages 三种协议,
 模型条目一份即可服务所有协议。
