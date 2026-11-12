@@ -8,7 +8,7 @@ import { account, fakeBaipiao, json, models, overview } from "./fake.mjs"
 let f
 afterEach(() => f?.close())
 
-const plugin = async (client = {}) => BaipiaoPlugin({ client })
+const plugin = async () => BaipiaoPlugin()
 
 const routes = (f, { access = "jwt-1", key = "sk-test-1" } = {}) => {
   f.route("GET /api/overview", (r) =>
@@ -90,16 +90,11 @@ test("the loader hands the gateway the base URL and the key the account has", as
   expect(keyed).toEqual({ baseURL: f.origin + "/v1", apiKey: "sk-mine" })
   const own = await hooks.auth.loader(async () => account({ apiKey: "sk-stored" }))
   expect(own.apiKey).toBe("sk-stored")
-  // an account signed in with its token alone picks its first active key up
-  // (list is masked; the plain key comes from the reveal page)
-  f.route("GET /api/keys", (r) =>
-    r.headers.get("authorization") === "Bearer jwt-1"
-      ? json({ keys: [{ id: 2, key_masked: "sk-***st", status: "active" }, { id: 3, key_masked: "sk-***nd", status: "active" }] })
-      : json({ detail: "x" }, 401),
-  )
-  f.route("GET /api/keys/2/reveal", () => json({ id: 2, key: "sk-first-plain" }))
-  const picked = await hooks.auth.loader(async () => account({ apiKey: undefined }))
-  expect(picked.apiKey).toBe("sk-first-plain")
+  // the key is the one the user named at sign-in; the account's own list is
+  // never asked, so nothing is revealed behind their back
+  const none = await hooks.auth.loader(async () => account({ apiKey: undefined }))
+  expect(none.apiKey).toBe("")
+  expect(f.seen.map((r) => r.path)).not.toContain("/api/keys")
 })
 
 test("the loader answers nothing for an unsigned-in auth", async () => {

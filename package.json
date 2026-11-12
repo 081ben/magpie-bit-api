@@ -1,7 +1,7 @@
 {
   "name": "@magpie-community/opencode-baipiao-auth",
-  "version": "0.1.0",
-  "description": "bit-api (ai.baipiao.co) account: email sign-in for balance, daily check-in and the key-backed model list",
+  "version": "0.1.1",
+  "description": "bit-api (ai.baipiao.co) account for magpie: community sign-in for balance and daily check-in, with the chat key you name",
   "type": "module",
   "main": "./index.mjs",
   "files": ["index.mjs", "README.md", "LICENSE"],

@@ -1,4 +1,4 @@
-// bit-api (ai.baipiao.co) provider plugin for OpenCode and magpie.
+// bit-api (ai.baipiao.co) provider plugin for magpie.
 //
 // The site is a bitapi (kingenbomb/bitapi) gateway: OpenAI- and
 // Anthropic-compatible at https://ai.baipiao.co/v1, billed from an account
@@ -13,8 +13,12 @@
 // Cookies), or the whole cookie string, and pastes it here. The value is the
 // JWT itself, and bitapi still accepts script clients' Bearer tokens on every
 // /api page (cookie sessions would need a CSRF header on POST), so the plugin
-// sends it as Bearer. Chat requests carry an API key (sk-…) instead, which the
-// plugin picks off the account's first key, or the user types one in.
+// sends it as Bearer.
+//
+// Chat requests carry an API key (sk-…) instead, which the user copies off the
+// console's Keys page. The sign-in asks for it up front as a "prompts"
+// question (magpie's own field) and requires it: which key pays for chat is the
+// user's call, so the plugin never guesses at the account's first one.
 //
 // bitapi issues no refresh token: a lapsed session signs in again the same way
 // (open the browser, copy the fresh cookie).
@@ -58,6 +62,8 @@ function sessionToken(pasted) {
   }
   return "";
 }
+
+const isKey = (v) => /^sk-\S+$/.test(String(v ?? "").trim());
 
 async function readResponse(res) {
   const text = await res.text();
@@ -117,8 +123,8 @@ function usageOf(v) {
 // ---- the models -------------------------------------------------------------
 
 // The gateway's /v1/models answers what the key's group serves (the guest
-// list without a token), as OpenAI's shape. magpie asks it with the account's
-// first key when the account has one, else with what the user typed.
+// list without a token), as OpenAI's shape. magpie asks it with the key the
+// user named at sign-in, or their session token when an account has no key.
 // magpie asks for the model table on every picker open, and the site takes
 // seconds to answer, so answers are cached for a day: the table only changes
 // when the site's group config does, and the picker must not pay the site's
@@ -196,30 +202,17 @@ async function checkIn(auth) {
   };
 }
 
-// ---- the keys ---------------------------------------------------------------
+// ---- the chat key -----------------------------------------------------------
 
-// firstKeyRaw asks the portal for the account's first active chat key. The
-// list only names masked keys; the plain key comes from the reveal page of
-// the first active id (what the console's own copy button asks).
-async function firstKeyRaw(auth) {
-  const v = await portalGet(auth, "/api/keys");
-  const rows = Array.isArray(v) ? v : Array.isArray(v?.keys) ? v.keys : [];
-  const row = rows.find((k) => k?.status === "active" && Number.isFinite(k?.id))
-    ?? rows.find((k) => typeof k?.key === "string" && k.key);
-  if (row?.key) return row.key; // a listing that does name plain keys
-  const id = row?.id;
-  if (!Number.isFinite(id)) throw new Error("bit-api keys: the account has no active key");
-  const revealed = await portalGet(auth, `/api/keys/${id}/reveal`);
-  const key = typeof revealed?.key === "string" ? revealed.key
-    : typeof revealed?.full === "string" ? revealed.full : "";
-  if (!key) throw new Error("bit-api keys: the portal named no plain key");
-  return key;
-}
+// The chat key is the user's, asked at sign-in: the console's Keys page is
+// where it comes from, and the plugin keeps it as the account's apiKey. The
+// account's own list (/api/keys and its reveal pages) is never consulted, so
+// the key that pays for chat is the one the user named rather than whichever
+// key the account happens to have first.
 
 // ---- the plugin -------------------------------------------------------------
 
-export const BaipiaoPlugin = async ({ client } = {}) => {
-  const save = (auth) => client?.auth?.set?.({ path: { id: PROVIDER }, body: auth })?.catch?.(() => {});
+export const BaipiaoPlugin = async () => {
   // the last model list this process discovered, so a config read before the
   // account's list is asked still offers models
   let last = {};
@@ -254,7 +247,18 @@ export const BaipiaoPlugin = async ({ client } = {}) => {
         {
           type: "oauth",
           label: "bit-api community sign-in (browser)",
-          authorize: () => authorizeCommunity(),
+          // the chat key is asked before the browser opens, as magpie's
+          // prompts do: which key pays for chat is the user's call
+          prompts: [
+            {
+              type: "password",
+              key: "apiKey",
+              message: "Chat key (sk-…, from the console's Keys page)",
+              placeholder: "sk-…",
+              validate: (v) => (isKey(v) ? undefined : "A chat key starts with sk-"),
+            },
+          ],
+          authorize: (inputs) => authorizeCommunity(inputs),
         },
         {
           type: "api",
@@ -265,9 +269,7 @@ export const BaipiaoPlugin = async ({ client } = {}) => {
       async loader(getAuth) {
         const auth = await getAuth();
         if (!auth) return {};
-        if (auth.type === "api" || (auth.type === "oauth" && !auth.access))
-          return { baseURL: `${hostOf()}/v1`, apiKey: auth.key ?? auth.apiKey };
-        return { baseURL: `${hostOf()}/v1`, apiKey: auth.apiKey ?? (await firstKey(auth).catch(() => "")) };
+        return { baseURL: `${hostOf()}/v1`, apiKey: auth.key ?? auth.apiKey ?? "" };
       },
       async usage(getAuth) {
         const auth = await withToken(getAuth);
@@ -289,10 +291,8 @@ export const BaipiaoPlugin = async ({ client } = {}) => {
     provider: {
       id: PROVIDER,
       async models(provider, { auth } = {}) {
-        // an api-key account asks with its key; a community account asks with
-        // its first key, and with its session token when it has no key yet
-        // (the gateway accepts a token on /v1/models too) — so the list is
-        // there as soon as the account is signed in
+        // the key the user named asks for the list; an account that has none
+        // yet falls back to its session token, which /v1/models also takes
         const key = auth?.type === "api" ? auth.key : auth?.apiKey;
         const list = await discoverModels(key)
           .catch(() => (auth?.access ? discoverModels(auth.access) : null))
@@ -321,11 +321,18 @@ export const BaipiaoPlugin = async ({ client } = {}) => {
 // copies the cookie from DevTools instead: Application → Cookies →
 // https://ai.baipiao.co → bitapi_session, or the whole Cookie header the
 // Network tab shows. The plugin takes the JWT out of either form and sends it
-// as a Bearer token. A chat key typed in the second prompt is used as it is;
-// one pasted empty leaves the key to the account's own first active key.
-// method "code" is what OpenCode's and magpie's sign-in dialogs do with it:
-// one field, the answer comes back to authorize.
-function authorizeCommunity() {
+// as a Bearer token.
+//
+// The chat key is asked by the method's prompts before this runs, so the paste
+// here is the session cookie alone.
+function authorizeCommunity(inputs) {
+  const apiKey = String(inputs?.apiKey ?? "").trim();
+  if (!isKey(apiKey)) {
+    return {
+      type: "failed",
+      error: "The chat key is missing: paste the sk-… key from the console's Keys page",
+    };
+  }
   return {
     url: `${HOST}/portal#/login`,
     instructions:
@@ -350,30 +357,13 @@ function authorizeCommunity() {
       } catch (e) {
         return { type: "failed", error: e instanceof Lapsed ? `The token was refused: ${e.message}` : `The token was refused: ${e?.message ?? e}` };
       }
-      const access = token;
-      // the account's first active key is picked up here (the keys list only
-      // names masked keys, so the plain one comes from its reveal page); a
-      // key typed at magpie's own api-key method wins whenever the user
-      // prefers one
       // Auth (magpie's store) is a union: an OAuth account must carry refresh
       // and expires. bitapi signs no refresh token and the JWT's expiry is
       // the site's own (7 days by default), so expires 0 means "never renew
       // automatically"; a lapsed sign-in is renewed by signing in again.
-      try {
-        const apiKey = await firstKeyRaw({ access: token });
-        return { type: "success", access, refresh: "none", expires: 0, apiKey, accountId: "bit-api" };
-      } catch {
-        // an account without a key yet still signs in; the loader picks the
-        // key up later, once the user makes one
-        return { type: "success", access, refresh: "none", expires: 0, accountId: "bit-api" };
-      }
+      return { type: "success", access: token, refresh: "none", expires: 0, apiKey, accountId: "bit-api" };
     },
   };
 }
 
-async function firstKey(auth) {
-  const key = await firstKeyRaw(auth);
-  return key;
-}
-
-export const _internal = { HOST, hostOf, PROVIDER, SDK, portalGet, usageOf, checkIn, discoverModels, firstKey, firstKeyRaw, authorizeCommunity, messageOf, money, sessionToken };
+export const _internal = { HOST, hostOf, PROVIDER, SDK, portalGet, usageOf, checkIn, discoverModels, authorizeCommunity, messageOf, money, sessionToken, isKey };

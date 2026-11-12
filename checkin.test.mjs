@@ -8,7 +8,7 @@ import { account, fakeBaipiao, json } from "./fake.mjs"
 let f
 afterEach(() => f?.close())
 
-const plugin = async (client = {}) => BaipiaoPlugin({ client })
+const plugin = async () => BaipiaoPlugin()
 
 const checkinRoute = (f, v, status = 200, access = "jwt-1") => {
   f.route("POST /api/checkin", (r) =>

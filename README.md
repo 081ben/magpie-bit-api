@@ -1,6 +1,6 @@
 # baipiao — bit-api 提供商插件
 
-[magpie](https://usemagpie.ai) / [OpenCode](https://opencode.ai) 的提供商插件,接入
+[magpie](https://usemagpie.ai) 的提供商插件,接入
 [bit-api](https://ai.baipiao.co/)。
 
 名称说明:
@@ -31,22 +31,26 @@
 
 走站点自己的网页登录,能查余额、能签到:
 
-1. magpie 里选择该登录方式,插件会打开 bit-api 的登录页;
-2. 在页面上完成登录(整个登录流程都发生在你的浏览器里——登录流绑定一个只有
-   浏览器持有的 HttpOnly cookie,插件无法代劳);
+1. magpie 里选择该登录方式,先按提示粘贴一把聊天密钥(`sk-…`,从控制台的
+   Keys 页复制)。**这一项必填**:聊天用哪把 key 由你决定,插件不会去猜账户
+   里"第一把"启用的密钥;
+2. 插件随后打开 bit-api 的登录页。在页面上完成登录(整个登录流程都发生在你的
+   浏览器里——登录流绑定一个只有浏览器持有的 HttpOnly cookie,插件无法代劳);
 3. 登录完成后,bit-api 把会话存在 **HttpOnly cookie `bitapi_session`** 里
    (旁边还有一个 `bitapi_csrf`)。页面脚本读不到它,站点自己还会在每次加载时
    `localStorage.removeItem("bitapi_token")`,所以**不能再从 localStorage 取 token**。
    在该页面按 **F12**,打开 **Application → Cookies → https://ai.baipiao.co**,
    复制 `bitapi_session` 的值;也可以从 **Network** 面板任一 `/api` 请求里复制整条
    `Cookie` 头,插件会自己取出其中的 `bitapi_session`;
-4. 插件验真后,自动抓取账户第一把启用的聊天密钥(与控制台"复制"按钮走同一个
-   reveal 接口),聊天与拉模型都用它。
+4. 插件用这份会话验真身份,然后把它和你在第 1 步给的 key 一起存下——查余额、
+   签到用会话,聊天与拉模型用那把 key。
 
 cookie 里装的就是站点签发的会话 JWT,默认 7 天有效;`bitapi_session` 本身是
 HttpOnly,而插件用的是同一个 JWT 的 `Authorization: Bearer`(bitapi 对脚本客户端
 保留 Bearer,GET 请求不需要 CSRF 头)。站点不签发 refresh token,过期后照原样
 重来一遍(打开浏览器、粘贴新 cookie)即可。
+
+key 用 magpie 的 `prompts` 单独提问,不用和 cookie 挤在一个框里。
 
 ### 二、API key
 
@@ -60,7 +64,9 @@ HttpOnly,而插件用的是同一个 JWT 的 `Authorization: Bearer`(bitapi 对�
 | `GET /v1/models` | API key | 账户分组可用模型(`https://ai.baipiao.co/v1`) |
 | `GET /api/overview` | 会话 token | 余额(卡片余额行)、今日消费与请求数 |
 | `POST /api/checkin` | 会话 token | 每日签到,UTC+8 自然日一次 |
-| `GET /api/keys` + `GET /api/keys/{id}/reveal` | 会话 token | 密钥列表只给脱敏串,明文按 id 单取 |
+
+站点的密钥列表(`/api/keys`)与明文 reveal 接口插件**不调用**:聊天用哪把 key
+由登录时你粘的那把决定。
 
 站点把浏览器登录态放在 HttpOnly cookie `bitapi_session` 里,同一份 JWT 也接受
 脚本客户端用 `Authorization: Bearer` 发来;插件走的就是 Bearer,因此 POST
@@ -76,8 +82,9 @@ HttpOnly,而插件用的是同一个 JWT 的 `Authorization: Bearer`(bitapi 对�
 
 ## 凭据存放
 
-存在 OpenCode / magpie 自己的 auth store 里(`~/.local/share/opencode/auth.json`,
-magpie 同结构),条目名为 `baipiao`。
+存在 magpie 自己的 auth store 里(`~/.config/magpie/plugin-auth.json`,条目名为
+`baipiao`),文件权限 0600。浏览器登录的条目是 `{type: "oauth", access, refresh:
+"none", expires: 0, apiKey, accountId}`,纯 key 的是 `{type: "api", key}`。
 
 ## 本地测试
 
