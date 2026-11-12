@@ -16,9 +16,11 @@
 // sends it as Bearer.
 //
 // Chat requests carry an API key (sk-…) instead, which the user copies off the
-// console's Keys page. The sign-in asks for it up front as a "prompts"
-// question (magpie's own field) and requires it: which key pays for chat is the
-// user's call, so the plugin never guesses at the account's first one.
+// console's Keys page once they are signed in. It comes back in the same paste
+// as the cookie, on a second line: magpie asks a method's "prompts" before it
+// opens the browser, and the key only exists to copy after the login. It is
+// required — which key pays for chat is the user's call, so the plugin never
+// guesses at the account's first one.
 //
 // bitapi issues no refresh token: a lapsed session signs in again the same way
 // (open the browser, copy the fresh cookie).
@@ -64,6 +66,43 @@ function sessionToken(pasted) {
 }
 
 const isKey = (v) => /^sk-\S+$/.test(String(v ?? "").trim());
+
+// signInPaste takes the account sign-in's paste and splits it into the session
+// token and the chat key. The session is a single cookie string, so the key
+// rides on a line of its own:
+//
+//   bitapi_session=eyJ…; bitapi_csrf=…
+//   sk-…
+//
+// A key on the cookie's own line (a Cookie header carrying one, or a second
+// field) is picked out too, so either shape works. Both are required: a paste
+// with one and not the other names no sign-in.
+function signInPaste(pasted) {
+  const lines = String(pasted ?? "")
+    .replace(/^\s*cookie:\s*/i, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  let key = "";
+  const rest = [];
+  for (const line of lines) {
+    if (!key && isKey(line)) key = line;
+    else rest.push(line);
+  }
+  const cookie = rest.join("; ");
+  const token = sessionToken(cookie);
+  if (!key) {
+    for (const part of cookie.split(";")) {
+      const i = part.indexOf("=");
+      const value = i > 0 ? part.slice(i + 1).trim() : part.trim();
+      if (isKey(value)) {
+        key = value;
+        break;
+      }
+    }
+  }
+  return { token, key };
+}
 
 async function readResponse(res) {
   const text = await res.text();
@@ -247,18 +286,9 @@ export const BaipiaoPlugin = async () => {
         {
           type: "oauth",
           label: "bit-api community sign-in (browser)",
-          // the chat key is asked before the browser opens, as magpie's
-          // prompts do: which key pays for chat is the user's call
-          prompts: [
-            {
-              type: "password",
-              key: "apiKey",
-              message: "Chat key (sk-…, from the console's Keys page)",
-              placeholder: "sk-…",
-              validate: (v) => (isKey(v) ? undefined : "A chat key starts with sk-"),
-            },
-          ],
-          authorize: (inputs) => authorizeCommunity(inputs),
+          // no prompts: the chat key can only be copied after the login, so it
+          // comes back in the paste the browser step asks for
+          authorize: () => authorizeCommunity(),
         },
         {
           type: "api",
@@ -323,16 +353,9 @@ export const BaipiaoPlugin = async () => {
 // Network tab shows. The plugin takes the JWT out of either form and sends it
 // as a Bearer token.
 //
-// The chat key is asked by the method's prompts before this runs, so the paste
-// here is the session cookie alone.
-function authorizeCommunity(inputs) {
-  const apiKey = String(inputs?.apiKey ?? "").trim();
-  if (!isKey(apiKey)) {
-    return {
-      type: "failed",
-      error: "The chat key is missing: paste the sk-… key from the console's Keys page",
-    };
-  }
+// The chat key comes back in the same paste as the cookie, on a second line: it
+// can only be copied after the login, so it cannot be a "prompts" question.
+function authorizeCommunity() {
   return {
     url: `${HOST}/portal#/login`,
     instructions:
@@ -340,15 +363,26 @@ function authorizeCommunity(inputs) {
       "a baipiao.org/bbs account. Back on bit-api's page, copy the session cookie: " +
       "press F12, open Application → Cookies → https://ai.baipiao.co, and copy " +
       "bitapi_session's value (or copy the whole Cookie header of any /api request " +
-      "from the Network tab). Paste it here. The site no longer keeps the token in " +
-      "localStorage.",
+      "from the Network tab). The site no longer keeps the token in localStorage. " +
+      "Put your chat key (sk-…, from the console's Keys page) on a second line, " +
+      "below the cookie, and paste both here.",
     method: "code",
     callback: async (code0) => {
-      const token = sessionToken(code0);
+      const { token, key } = signInPaste(code0);
       if (!token) {
         return {
           type: "failed",
-          error: "Paste the bitapi_session cookie's value (or the whole Cookie header)",
+          error:
+            "Paste the bitapi_session cookie's value (or the whole Cookie header)" +
+            (key ? ", and the chat key on a second line" : ""),
+        };
+      }
+      if (!key) {
+        return {
+          type: "failed",
+          error:
+            "Paste your chat key too, on a second line below the cookie " +
+            "(sk-…, from the console's Keys page)",
         };
       }
       // a wrong paste says so now, not on the first request
@@ -361,9 +395,9 @@ function authorizeCommunity(inputs) {
       // and expires. bitapi signs no refresh token and the JWT's expiry is
       // the site's own (7 days by default), so expires 0 means "never renew
       // automatically"; a lapsed sign-in is renewed by signing in again.
-      return { type: "success", access: token, refresh: "none", expires: 0, apiKey, accountId: "bit-api" };
+      return { type: "success", access: token, refresh: "none", expires: 0, apiKey: key, accountId: "bit-api" };
     },
   };
 }
 
-export const _internal = { HOST, hostOf, PROVIDER, SDK, portalGet, usageOf, checkIn, discoverModels, authorizeCommunity, messageOf, money, sessionToken, isKey };
+export const _internal = { HOST, hostOf, PROVIDER, SDK, portalGet, usageOf, checkIn, discoverModels, authorizeCommunity, messageOf, money, sessionToken, signInPaste, isKey };
